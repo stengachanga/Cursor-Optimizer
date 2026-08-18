@@ -18,4 +18,4 @@ We need a Cursor resource optimizer that watches disk/RAM, reclaims safe space, 
 
 - Two components to maintain (script + skill).
 - Cloud offload remains optional for heavy compute; it does not replace local cleanup.
-- Deny-list must be enforced in the Monitor so the Confirmer cannot be bypassed by a bad prompt alone.
+- Deny-list and path roots are enforced in code (`Get-OptimizerPathDecision` + `Remove-OptimizerManagedPath`). The Confirmer skill must call that helper; a prompt alone cannot bypass Deny.

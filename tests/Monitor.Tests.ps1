@@ -27,7 +27,10 @@ Describe 'New-OptimizerMonitorReport' {
             [pscustomobject]@{ Path = 'C:\Users\example\Projects\DemoApp\src\main.ts'; AgeDays = 0; ProjectFolderIdle = $false }
         )
         $queuePath = Join-Path $tempRoot 'pending-confirmations.json'
-        $report = New-OptimizerMonitorReport -Pressure $pressure -Candidates $candidates -QueuePath $queuePath -EnqueuePending
+        $report = New-OptimizerMonitorReport -Pressure $pressure -Candidates $candidates -QueuePath $queuePath -EnqueuePending `
+            -CursorUserHome 'C:\Users\x\.cursor' `
+            -CursorAppData 'C:\Users\x\AppData\Roaming\Cursor' `
+            -TempRoot 'C:\Users\x\AppData\Local\Temp'
 
         $report.Pressure.Level | Should Be 'Critical'
         $report.PreferInMemoryReport | Should Be $true
@@ -45,7 +48,10 @@ Describe 'New-OptimizerMonitorReport' {
             [pscustomobject]@{ Path = 'C:\Users\x\AppData\Local\Temp\cursor-sandbox-cache\h'; AgeDays = 10; ProjectFolderIdle = $false }
         )
         $queuePath = Join-Path $tempRoot 'pending-confirmations.json'
-        $report = New-OptimizerMonitorReport -Pressure $pressure -Candidates $candidates -QueuePath $queuePath
+        $report = New-OptimizerMonitorReport -Pressure $pressure -Candidates $candidates -QueuePath $queuePath `
+            -CursorUserHome 'C:\Users\x\.cursor' `
+            -CursorAppData 'C:\Users\x\AppData\Roaming\Cursor' `
+            -TempRoot 'C:\Users\x\AppData\Local\Temp'
         @($report.PendingConfirm).Count | Should Be 1
         @(Get-OptimizerPendingConfirmations -QueuePath $queuePath).Count | Should Be 0
     }

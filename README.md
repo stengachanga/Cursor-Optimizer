@@ -73,7 +73,7 @@ Invoke-Pester -Path .\tests
 
 `config\optimizer.json` — thresholds, dry-run, queue/report paths.
 
-Deleting allow-listed paths requires **both** `"applyAllowList": true` **and** `-ApplyAllowList` on the script.
+Deleting allow-listed paths requires **both** `"applyAllowList": true` **and** `-ApplyAllowList` on the script. Actual deletes go through `Remove-OptimizerManagedPath` (canonical path, Cursor roots only, no reparse points). The Confirmer skill must use that helper with `-RequiredDecision PendingConfirm` — never raw `Remove-Item`.
 
 ## Docs
 

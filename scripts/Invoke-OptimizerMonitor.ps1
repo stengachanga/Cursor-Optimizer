@@ -15,9 +15,27 @@ $src = Join-Path $root 'src'
 . (Join-Path $src 'Optimizer.Pressure.ps1')
 . (Join-Path $src 'Optimizer.PendingQueue.ps1')
 . (Join-Path $src 'Optimizer.Monitor.ps1')
+. (Join-Path $src 'Optimizer.Delete.ps1')
 
 function Expand-EnvPath([string]$p) {
     [Environment]::ExpandEnvironmentVariables($p)
+}
+
+function Get-OptimizerPositiveInt($value, [int]$default) {
+    if ($null -eq $value -or $value -eq '') { return $default }
+    try {
+        $n = [int]$value
+    }
+    catch {
+        return $default
+    }
+    if ($n -le 0) { return $default }
+    return $n
+}
+
+function Get-OptimizerConfigBool($obj, [string]$name, [bool]$default) {
+    if ($obj.PSObject.Properties.Name -notcontains $name) { return $default }
+    return [bool]$obj.$name
 }
 
 function Test-CursorRunning {
@@ -31,13 +49,48 @@ function Get-DirAgeDays([string]$path) {
 }
 
 function Get-VolumeBytes([string]$driveLetter) {
-    $letter = $driveLetter.TrimEnd(':')
+    $letter = ($driveLetter.TrimEnd(':')).ToUpperInvariant()
+    if ($letter -notmatch '^[A-Z]$') {
+        throw "Invalid volume '$driveLetter'"
+    }
     $vol = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$letter`:'"
     if (-not $vol) { throw "Volume $driveLetter not found" }
     return @{ Total = [long]$vol.Size; Free = [long]$vol.FreeSpace }
 }
 
 function Get-AvailableRamBytes {
+    try {
+        if (-not ('OptimizerNativeMemory' -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class OptimizerNativeMemory {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct MEMORYSTATUSEX {
+    public uint dwLength;
+    public uint dwMemoryLoad;
+    public ulong ullTotalPhys;
+    public ulong ullAvailPhys;
+    public ulong ullTotalPageFile;
+    public ulong ullAvailPageFile;
+    public ulong ullTotalVirtual;
+    public ulong ullAvailVirtual;
+    public ulong ullAvailExtendedVirtual;
+  }
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+}
+"@
+        }
+        $ms = New-Object OptimizerNativeMemory+MEMORYSTATUSEX
+        $ms.dwLength = 64
+        if ([OptimizerNativeMemory]::GlobalMemoryStatusEx([ref]$ms)) {
+            return [long]$ms.ullAvailPhys
+        }
+    }
+    catch {
+        # fall through
+    }
     $m = Get-CimInstance -ClassName Win32_OperatingSystem
     return [long]$m.FreePhysicalMemory * 1KB
 }
@@ -45,6 +98,12 @@ function Get-AvailableRamBytes {
 $configRaw = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $queuePath = Expand-EnvPath $configRaw.queuePath
 $reportPath = Expand-EnvPath $configRaw.reportPath
+$logRetentionDays = Get-OptimizerPositiveInt $configRaw.logRetentionDays 14
+$artifactMinAge = Get-OptimizerPositiveInt $configRaw.agentArtifactMinAgeDays 14
+$preferInMemory = Get-OptimizerConfigBool $configRaw 'preferInMemoryReport' $true
+$useCloud = Get-OptimizerConfigBool $configRaw 'useCloudAgentsForHeavyWork' $false
+$applyAllowListCfg = Get-OptimizerConfigBool $configRaw 'applyAllowList' $false
+$requireCursorQuit = Get-OptimizerConfigBool $configRaw 'requireCursorQuit' $true
 
 $drive = @($configRaw.volumes)[0]
 $vol = Get-VolumeBytes $drive
@@ -54,15 +113,16 @@ $pressure = Get-OptimizerPressure `
     -TotalBytes $vol.Total `
     -FreeBytes $vol.Free `
     -AvailableRamBytes $ram `
-    -WarnFreePercent ([double]$configRaw.warnFreePercent) `
-    -CriticalFreePercent ([double]$configRaw.criticalFreePercent) `
-    -CriticalFreeGB ([double]$configRaw.criticalFreeGB) `
-    -MinAvailableRamGB ([double]$configRaw.minAvailableRamGB)
+    -WarnFreePercent ([double](Get-OptimizerPositiveInt $configRaw.warnFreePercent 15)) `
+    -CriticalFreePercent ([double](Get-OptimizerPositiveInt $configRaw.criticalFreePercent 10)) `
+    -CriticalFreeGB ([double](Get-OptimizerPositiveInt $configRaw.criticalFreeGB 5)) `
+    -MinAvailableRamGB ([double](Get-OptimizerPositiveInt $configRaw.minAvailableRamGB 2))
 
 $cursorRunning = Test-CursorRunning
 $candidates = @()
+$roots = Get-OptimizerDefaultRoots
 
-$roaming = Join-Path $env:APPDATA 'Cursor'
+$roaming = $roots.CursorAppData
 $allowRoots = @(
     (Join-Path $roaming 'Cache'),
     (Join-Path $roaming 'GPUCache'),
@@ -81,41 +141,44 @@ $logsRoot = Join-Path $roaming 'logs'
 if (Test-Path -LiteralPath $logsRoot) {
     Get-ChildItem -LiteralPath $logsRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $age = Get-DirAgeDays $_.FullName
-        if ($age -ge [int]$configRaw.logRetentionDays) {
-            $candidates += [pscustomobject]@{ Path = $_.FullName; AgeDays = $age; ProjectFolderIdle = $false }
-        }
+        $candidates += [pscustomobject]@{ Path = $_.FullName; AgeDays = $age; ProjectFolderIdle = $false }
     }
 }
 
 $cachedData = Join-Path $roaming 'CachedData'
 if (Test-Path -LiteralPath $cachedData) {
     $versions = @(Get-ChildItem -LiteralPath $cachedData -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
-    if ($versions.Count -gt 2) {
-        $versions | Select-Object -Skip 2 | ForEach-Object {
-            $candidates += [pscustomobject]@{ Path = $_.FullName; AgeDays = (Get-DirAgeDays $_.FullName); ProjectFolderIdle = $false }
+    $i = 0
+    foreach ($ver in $versions) {
+        $eligible = $i -ge 2
+        $candidates += [pscustomobject]@{
+            Path                       = $ver.FullName
+            AgeDays                    = (Get-DirAgeDays $ver.FullName)
+            ProjectFolderIdle          = $false
+            CachedDataEligibleForPrune = $eligible
         }
+        $i++
     }
 }
 
-$projectsRoot = Join-Path $env:USERPROFILE '.cursor\projects'
+$projectsRoot = Join-Path $roots.CursorUserHome 'projects'
 if (Test-Path -LiteralPath $projectsRoot) {
     Get-ChildItem -LiteralPath $projectsRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        $projAge = Get-DirAgeDays $_.FullName
-        $idle = $projAge -ge [int]$configRaw.agentArtifactMinAgeDays
         foreach ($name in @('terminals', 'agent-tools', 'agent-transcripts', 'canvases')) {
             $p = Join-Path $_.FullName $name
             if (Test-Path -LiteralPath $p) {
+                $artAge = Get-DirAgeDays $p
                 $candidates += [pscustomobject]@{
                     Path              = $p
-                    AgeDays           = (Get-DirAgeDays $p)
-                    ProjectFolderIdle = $idle
+                    AgeDays           = $artAge
+                    ProjectFolderIdle = ($artAge -ge $artifactMinAge)
                 }
             }
         }
     }
 }
 
-$sandbox = Join-Path $env:TEMP 'cursor-sandbox-cache'
+$sandbox = Join-Path $roots.TempRoot 'cursor-sandbox-cache'
 if (Test-Path -LiteralPath $sandbox) {
     $candidates += [pscustomobject]@{ Path = $sandbox; AgeDays = (Get-DirAgeDays $sandbox); ProjectFolderIdle = $false }
 }
@@ -125,27 +188,35 @@ if (Test-Path -LiteralPath $agentCli) {
     $candidates += [pscustomobject]@{ Path = $agentCli; AgeDays = (Get-DirAgeDays $agentCli); ProjectFolderIdle = $false }
 }
 
-$enqueue = -not [bool]$NoEnqueue
+$ramFirst = [bool]$pressure.PreferInMemoryReport -and $preferInMemory
+$enqueue = (-not [bool]$NoEnqueue) -and (-not $ramFirst)
+$cloudSwitch = @{ }
+if ($useCloud) { $cloudSwitch['UseCloudAgentsForHeavyWork'] = $true }
+
 $report = New-OptimizerMonitorReport `
     -Pressure $pressure `
     -Candidates $candidates `
     -QueuePath $queuePath `
     -EnqueuePending:$enqueue `
-    -AgentArtifactMinAgeDays ([int]$configRaw.agentArtifactMinAgeDays)
+    -AgentArtifactMinAgeDays $artifactMinAge `
+    -LogRetentionDays $logRetentionDays `
+    -CursorUserHome $roots.CursorUserHome `
+    -CursorAppData $roots.CursorAppData `
+    -TempRoot $roots.TempRoot `
+    @cloudSwitch
 
 $report | Add-Member -NotePropertyName CursorRunning -NotePropertyValue $cursorRunning -Force
 $report | Add-Member -NotePropertyName CandidateCount -NotePropertyValue $candidates.Count -Force
 
-# User-facing console lines (ASCII). Russian copy lives in skills/README (ADR 0004).
 Write-Host ("Optimizer Monitor | disk: {0} | free: {1}% ({2} GB) | avail RAM ~{3} GB" -f `
     $pressure.Level, $pressure.FreePercent, $pressure.FreeGB, $pressure.AvailableRamGB)
 Write-Host ("AllowAuto: {0} | PendingConfirm: {1} | Deny: {2} | mode: {3}" -f `
     @($report.AllowAuto).Count, @($report.PendingConfirm).Count, @($report.Deny).Count, $report.Mode)
-if ($report.PreferInMemoryReport) {
-    Write-Host 'RAM-first: skipping report file write while disk is critical and RAM is available.'
+if ($ramFirst) {
+    Write-Host 'RAM-first: skipping report and pending-queue writes while disk is critical and RAM is available.'
 }
 
-$shouldWriteReport = -not ($report.PreferInMemoryReport -and [bool]$configRaw.preferInMemoryReport)
+$shouldWriteReport = -not $ramFirst
 if ($shouldWriteReport) {
     $reportDir = Split-Path -Parent $reportPath
     if (-not (Test-Path -LiteralPath $reportDir)) {
@@ -158,23 +229,43 @@ else {
     Write-Host 'Report not written to disk (RAM-first).'
 }
 
-# Deletes require BOTH -ApplyAllowList and config.applyAllowList=true (scheduled tasks stay dry-run otherwise).
-$doApply = $ApplyAllowList -and ([bool]$configRaw.applyAllowList)
+$doApply = $ApplyAllowList -and $applyAllowListCfg
+$deleted = 0
 if ($doApply) {
-    if ([bool]$configRaw.requireCursorQuit -and $cursorRunning) {
+    if ($requireCursorQuit -and $cursorRunning) {
         Write-Host 'AllowAuto delete skipped: Cursor is running (requireCursorQuit).'
     }
     else {
         foreach ($item in @($report.AllowAuto)) {
-            if (Test-Path -LiteralPath $item.Path) {
-                Remove-Item -LiteralPath $item.Path -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Host "Deleted: $($item.Path)"
+            $delParams = @{
+                Path                    = $item.Path
+                RequiredDecision        = 'AllowAuto'
+                AgeDays                 = [int]$item.AgeDays
+                AgentArtifactMinAgeDays = $artifactMinAge
+                LogRetentionDays        = $logRetentionDays
+                CursorUserHome          = $roots.CursorUserHome
+                CursorAppData           = $roots.CursorAppData
+                TempRoot                = $roots.TempRoot
+            }
+            if ($item.ProjectFolderIdle) { $delParams['ProjectFolderIdle'] = $true }
+            if ($item.CachedDataEligibleForPrune) { $delParams['CachedDataEligibleForPrune'] = $true }
+            $result = Remove-OptimizerManagedPath @delParams
+            if ($result.Deleted) {
+                $deleted++
+                Write-Host "Deleted: $($result.Path)"
+            }
+            else {
+                Write-Host "Skipped $($result.Path) ($($result.Reason))"
             }
         }
     }
 }
 else {
     Write-Host 'Dry-run: no deletes. Pending items go through the Confirmer skill.'
+}
+
+if ($doApply -and $deleted -gt 0) {
+    $report.Mode = 'delete-safe'
 }
 
 if ($queuePath -and (Test-Path -LiteralPath $queuePath)) {

@@ -15,8 +15,21 @@ function New-OptimizerMonitorReport {
 
         [switch]$EnqueuePending,
 
-        [int]$AgentArtifactMinAgeDays = 14
+        [int]$AgentArtifactMinAgeDays = 14,
+
+        [int]$LogRetentionDays = 14,
+
+        [string]$CursorUserHome,
+
+        [string]$CursorAppData,
+
+        [string]$TempRoot,
+
+        [switch]$UseCloudAgentsForHeavyWork
     )
+
+    if ($AgentArtifactMinAgeDays -le 0) { $AgentArtifactMinAgeDays = 14 }
+    if ($LogRetentionDays -le 0) { $LogRetentionDays = 14 }
 
     $allowAuto = @()
     $pending = @()
@@ -33,19 +46,31 @@ function New-OptimizerMonitorReport {
         if ($c.PSObject.Properties.Name -contains 'AgeDays') {
             $age = [int]$c.AgeDays
         }
-
-        if ($idle) {
-            $d = Get-OptimizerPathDecision -Path ([string]$c.Path) -AgeDays $age -AgentArtifactMinAgeDays $AgentArtifactMinAgeDays -ProjectFolderIdle
-        }
-        else {
-            $d = Get-OptimizerPathDecision -Path ([string]$c.Path) -AgeDays $age -AgentArtifactMinAgeDays $AgentArtifactMinAgeDays
+        $prune = $false
+        if ($c.PSObject.Properties.Name -contains 'CachedDataEligibleForPrune') {
+            $prune = [bool]$c.CachedDataEligibleForPrune
         }
 
+        $decisionParams = @{
+            Path                     = [string]$c.Path
+            AgeDays                  = $age
+            AgentArtifactMinAgeDays  = $AgentArtifactMinAgeDays
+            LogRetentionDays         = $LogRetentionDays
+        }
+        if ($idle) { $decisionParams['ProjectFolderIdle'] = $true }
+        if ($prune) { $decisionParams['CachedDataEligibleForPrune'] = $true }
+        if ($CursorUserHome) { $decisionParams['CursorUserHome'] = $CursorUserHome }
+        if ($CursorAppData) { $decisionParams['CursorAppData'] = $CursorAppData }
+        if ($TempRoot) { $decisionParams['TempRoot'] = $TempRoot }
+
+        $d = Get-OptimizerPathDecision @decisionParams
         $entry = [pscustomobject]@{
-            Path     = $d.Path
-            Decision = $d.Decision
-            Reason   = $d.Reason
-            AgeDays  = $age
+            Path                         = $d.Path
+            Decision                     = $d.Decision
+            Reason                       = $d.Reason
+            AgeDays                      = $age
+            ProjectFolderIdle            = $idle
+            CachedDataEligibleForPrune   = $prune
         }
 
         switch ($d.Decision) {
@@ -65,6 +90,11 @@ function New-OptimizerMonitorReport {
         $prefer = [bool]$Pressure.PreferInMemoryReport
     }
 
+    $hint = 'Cloud offload is off by default; prefer Cloud Agents for heavy work.'
+    if ($UseCloudAgentsForHeavyWork) {
+        $hint = 'Cloud offload is enabled: prefer Cloud Agents for heavy regenerable work.'
+    }
+
     return [pscustomobject]@{
         GeneratedAt           = (Get-Date).ToString('o')
         Pressure              = $Pressure
@@ -73,6 +103,6 @@ function New-OptimizerMonitorReport {
         PendingConfirm        = $pending
         Deny                  = $deny
         Mode                  = 'dry-run'
-        CloudOffloadHint      = 'Cloud offload is off by default; prefer Cloud Agents for heavy work.'
+        CloudOffloadHint      = $hint
     }
 }
