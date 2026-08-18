@@ -1,0 +1,3 @@
+# Artifact scope and default cleanup mode
+
+Accepted 2026-08-18. Under `~\.cursor\projects\`, the Monitor may auto-clean `terminals` and `agent-tools` older than **14 days** (and only when that project folder looks idle); `agent-transcripts` and `canvases` go only through the Confirmer. Default mode is dry-run then auto-delete for allow-listed caches only; everything else needs the Confirmer. We rejected “everything via Confirmer” (too noisy) and “auto-delete transcripts” (irreversible chat loss). Schedule and cloud-offload defaults are config, not this ADR: Windows logon + daily run; cloud offload off by default (report hint only).

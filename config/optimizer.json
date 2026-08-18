@@ -1,0 +1,16 @@
+{
+  "volumes": ["C:"],
+  "warnFreePercent": 15,
+  "criticalFreePercent": 10,
+  "criticalFreeGB": 5,
+  "minAvailableRamGB": 2,
+  "preferInMemoryReport": true,
+  "useCloudAgentsForHeavyWork": false,
+  "mode": "dry-run",
+  "applyAllowList": false,
+  "requireCursorQuit": true,
+  "agentArtifactMinAgeDays": 14,
+  "logRetentionDays": 14,
+  "queuePath": "%USERPROFILE%\\.cursor\\optimizer\\pending-confirmations.json",
+  "reportPath": "%USERPROFILE%\\.cursor\\optimizer\\last-report.json"
+}
