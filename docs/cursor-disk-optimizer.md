@@ -1,23 +1,23 @@
-# Cursor disk resource optimizer — research
+﻿# Cursor disk resource optimizer — research
 
 **Date:** 2026-08-10 (inventory); **Addendum:** 2026-08-18 (RAM-aware policy + cloud offload)  
-**Machine:** Windows 10/11, user `<local>`  
+**Environment:** Windows 10/11 (sanitized local inventory)  
 **Scope:** How to build a Cursor resource-optimization script/agent that monitors disk usage and safely deletes unnecessary data (caches, old copies, stale artifacts). Extended 2026-08-18 to cover **RAM-before-disk** behavior under low free space and **cloud offload** for heavy regenerable work.  
 **Method:** Primary sources only — Cursor docs, VS Code / Electron docs, Microsoft Windows APIs, and local filesystem inspection on this machine.
 
 ## Verdict
 
-Cursor already documents **one first-party local disk cleanup mechanism**: automatic Git **worktree** retention (`cursor.worktreeMaxCount` default 25, interval hours). There is **no official Cursor doc** describing a general “clear caches / reclaim disk” product feature for `%APPDATA%\Cursor` or `~/.cursor`. **Cursor Automations run cloud agents** and therefore **cannot** safely own *local* disk cleanup on this PC. On this machine, C: is critically low (**~5.6 GB free / ~4.8%**). The single largest measured Cursor-related consumer is **`%TEMP%\cursor-sandbox-cache` (~13.8 GB)**, followed by **`User\globalStorage\state.vscdb` (~798 MB)**, **`anysphere.cursor-agent-worker\agent-cli` (~524 MB)**, and **`logs` (~453 MB)** — not the small Chromium `Cache`/`GPUCache` folders. The recommended architecture is a **hybrid**: a **local PowerShell (or Python) scheduled monitor** (Task Scheduler) that inventories + dry-runs safe deletes, plus an optional **local Cursor Agent skill** for human-in-the-loop review before irreversible removals.
+Cursor already documents **one first-party local disk cleanup mechanism**: automatic Git **worktree** retention (`cursor.worktreeMaxCount` default 25, interval hours). There is **no official Cursor doc** describing a general “clear caches / reclaim disk” product feature for `%APPDATA%\Cursor` or `~/.cursor`. **Cursor Automations run cloud agents** and therefore **cannot** safely own *local* disk cleanup on this PC. Example measurement on a constrained Windows volume (illustrative sizes below). The single largest measured Cursor-related consumer is **`%TEMP%\cursor-sandbox-cache` (~13.8 GB)**, followed by **`User\globalStorage\state.vscdb` (~798 MB)**, **`anysphere.cursor-agent-worker\agent-cli` (~524 MB)**, and **`logs` (~453 MB)** — not the small Chromium `Cache`/`GPUCache` folders. The recommended architecture is a **hybrid**: a **local PowerShell (or Python) scheduled monitor** (Task Scheduler) that inventories + dry-runs safe deletes, plus an optional **local Cursor Agent skill** for human-in-the-loop review before irreversible removals.
 
 **Addendum (2026-08-18):** When free disk is critical, the monitor should treat **available RAM as the preferred working medium** — inventory/report in memory, avoid large temp/log writes, and skip delete paths that create new temp files — grounded in Windows commit/pagefile needing free disk to grow ([page-file sizing](https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/how-to-determine-the-appropriate-page-file-size-for-64-bit-versions-of-windows), [`ullAvailPhys`](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/ns-sysinfoapi-memorystatusex)). Pure-RAM cleanup **cannot** shrink on-disk `state.vscdb`, `agent-cli`, or pagefile growth needs; those remain local FS problems. **Cloud Agents / Automations / SDK `cloud:`** can absorb regenerable compute (clone, build, re-index-like work, agent runs) in isolated VMs so local disk/RAM stay freer, but they **cannot** delete `%APPDATA%\Cursor` or free local logs ([Automations](https://cursor.com/docs/cloud-agent/automations), [Cloud Agents](https://cursor.com/docs/cloud-agent), [SDK](https://cursor.com/docs/sdk/typescript)).
 
 ## Inventory (Windows)
 
-Sizes below were measured on this machine via PowerShell recursive `Length` sums (top-level / sampled). They are approximate snapshots as of 2026-08-10 and can change while Cursor is running.
+Sizes below are from a sanitized Windows inventory (PowerShell recursive `Length` sums, top-level / sampled). They are approximate research snapshots and will differ on other machines.
 
-**Volume pressure (primary):** `C:` ≈ **117.29 GB** total, **5.6 GB** free (**4.8%**). Source: local `Get-CimInstance Win32_LogicalDisk` (Win32 API family documented by Microsoft as `GetDiskFreeSpaceExW`).
+**Volume pressure (primary):** `C:` (example snapshot): low free space observed during research. Source: local `Get-CimInstance Win32_LogicalDisk` (Win32 API family documented by Microsoft as `GetDiskFreeSpaceExW`).
 
-| Path | Role (inferred + docs) | Size (this machine) | Safety class | Source |
+| Path | Role (inferred + docs) | Size (example) | Safety class | Source |
 | --- | --- | --- | --- | --- |
 | `%USERPROFILE%\.cursor\` | Cursor user home: MCP, skills, projects metadata, extensions | ~43 MB top-level sum | **Mixed** — config irreversible; project caches regenerable | Local listing |
 | `%USERPROFILE%\.cursor\mcp.json` | MCP server config | ~0 | **Never auto-delete** | Local; MCP docs |
